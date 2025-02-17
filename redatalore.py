@@ -1,7 +1,20 @@
 import os
 from datetime import datetime
 import json
-from colorama import init, Fore, Style
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.syntax import Syntax
+from rich.traceback import install
+from rich.prompt import Prompt
+from rich.markdown import Markdown
+from rich.text import Text
+from rich.live import Live
+from rich.layout import Layout
+from rich import print as rprint
+import matplotlib
+matplotlib.use('Agg')  # Set non-interactive backend
 from pygments import highlight
 from pygments.lexers import get_lexer_by_name
 from pygments.formatters import TerminalFormatter
@@ -26,22 +39,21 @@ import time
 from openai import OpenAI
 
 load_dotenv()
-init()
+install()  # Install rich traceback handler
 
-USER_COLOR = Fore.WHITE
-CLAUDE_COLOR = Fore.BLUE
-TOOL_COLOR = Fore.YELLOW
-RESULT_COLOR = Fore.GREEN
+console = Console()
 
 # Create the OpenAI client with OpenRouter's API endpoint and your API key.
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=os.getenv("OPENROUTER_API_KEY"),
 )
-
+#openai/gpt-4o-2024-11-20
+#anthropic/claude-3-5-haiku
 conversation_history = []
 current_df = None
 figure_counter = 0
+
 
 system_prompt = """
 You are Claude, an AI data analyst for Datalore, integrated with a data analysis system. Your capabilities include:
@@ -61,31 +73,66 @@ When interacting with the user:
 If you are unsure, ask for clarification.
 """
 
-def print_colored(text, color):
-    print(f"{color}{text}{Style.RESET_ALL}")
+WELCOME_ART = """
+╔══════════════════════════════════════════════════════════════╗
+║                                                              ║
+║                      🔮 DATALORE 🔮                         ║
+║                                                              ║
+║              Your AI-powered Data Analysis Tool              ║
+║                                                              ║
+╚══════════════════════════════════════════════════════════════╝
+"""
+
+def print_colored(text, style=""):
+    """Enhanced print function using rich"""
+    console.print(text, style=style)
 
 def print_code(code, language):
-    try:
-        lexer = get_lexer_by_name(language, stripall=True)
-        formatted_code = highlight(code, lexer, TerminalFormatter())
-        print(formatted_code)
-    except pygments.util.ClassNotFound:
-        print_colored(f"Code (language: {language}):\n{code}", CLAUDE_COLOR)
+    """Enhanced code printing with syntax highlighting"""
+    syntax = Syntax(code, language, theme="monokai", line_numbers=True)
+    console.print(syntax)
+
+def display_dataframe(df, title="DataFrame Preview"):
+    """Enhanced DataFrame display using rich tables"""
+    table = Table(title=title, show_header=True, header_style="bold magenta")
+    
+    # Add columns
+    for column in df.columns:
+        table.add_column(str(column), style="cyan")
+    
+    # Add rows
+    for _, row in df.head().iterrows():
+        table.add_row(*[str(val) for val in row])
+    
+    console.print(table)
+
+def show_progress(description="Processing"):
+    """Create a progress context for long operations"""
+    return Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        transient=True
+    )
 
 def read_data(file_path, file_type):
     global current_df
-    try:
-        if file_type == "csv":
-            current_df = pd.read_csv(file_path)
-        elif file_type == "excel":
-            current_df = pd.read_excel(file_path)
-        elif file_type == "json":
-            current_df = pd.read_json(file_path)
-        else:
-            return "Unsupported file type"
-        return f"Data read successfully. Shape: {current_df.shape}\n\nFirst few rows:\n{current_df.head().to_string()}"
-    except Exception as e:
-        return f"Error reading file: {str(e)}"
+    with show_progress(f"Reading {file_type} file") as progress:
+        task = progress.add_task(description="Reading...", total=None)
+        try:
+            if file_type == "csv":
+                current_df = pd.read_csv(file_path)
+            elif file_type == "excel":
+                current_df = pd.read_excel(file_path)
+            elif file_type == "json":
+                current_df = pd.read_json(file_path)
+            else:
+                return "Unsupported file type"
+            progress.update(task, completed=True)
+            display_dataframe(current_df, f"Data from {file_path}")
+            return f"Data read successfully. Shape: {current_df.shape}"
+        except Exception as e:
+            console.print(f"[red]Error reading file:[/red] {str(e)}")
+            return f"Error reading file: {str(e)}"
 
 def preprocess_data(operations):
     global current_df
@@ -127,7 +174,13 @@ def visualize_data(plot_type, x_column, y_column=None):
     if current_df is None:
         return "No data loaded. Please read a data file first."
     try:
+        # Clear any existing plots
+        plt.clf()
+        plt.close('all')
+        
+        # Create new figure
         plt.figure(figsize=(10, 6))
+        
         if plot_type == "scatter":
             sns.scatterplot(data=current_df, x=x_column, y=y_column)
         elif plot_type == "bar":
@@ -136,22 +189,26 @@ def visualize_data(plot_type, x_column, y_column=None):
             sns.histplot(data=current_df, x=x_column)
         elif plot_type == "line":
             sns.lineplot(data=current_df, x=x_column, y=y_column)
+        
         plt.title(f"{plot_type.capitalize()} plot")
+        plt.tight_layout()
         
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         figure_counter += 1
         filename = f"plot_{timestamp}_{figure_counter}.png"
         
+        # Save and close
         plt.savefig(filename)
-        plt.close()
+        plt.close('all')
         
         return f"Visualization saved as {filename}"
     except Exception as e:
+        plt.close('all')  # Ensure cleanup on error
         return f"Error during visualization: {str(e)}"
 
 def execute_code(code, timeout=30, max_output_length=10000):
     global current_df, figure_counter
-
+    
     def analyze_code_safety(code):
         """Analyze the code for potentially unsafe operations."""
         try:
@@ -204,6 +261,10 @@ def execute_code(code, timeout=30, max_output_length=10000):
         
         return result
 
+    # Clear any existing plots before execution
+    plt.clf()
+    plt.close('all')
+
     # Step 1: Analyze code safety
     is_safe, safety_message = analyze_code_safety(code)
     if not is_safe:
@@ -255,7 +316,7 @@ def execute_code(code, timeout=30, max_output_length=10000):
         except Exception as e:
             output += f"\nPlot saving error: {str(e)}"
         finally:
-            plt.close()
+            plt.close('all')  # Ensure all figures are closed
 
     return {
         "output": output,
@@ -387,100 +448,127 @@ def chat_with_claude(user_input):
     if not any(msg.get("role") == "system" for msg in conversation_history):
         conversation_history.insert(0, {"role": "system", "content": system_prompt})
     
-    # Extract only function definitions from our tools
-    functions_list = [tool["function"] for tool in tools if "function" in tool]
-
-    while True:
+    try:
+        response = client.chat.completions.create(
+            model="openai/o3-mini-high",
+            messages=conversation_history,
+            tools=tools,
+            tool_choice="auto"
+        )
+    except Exception as e:
+        console.print(f"[red]API request error:[/red] {str(e)}")
+        return f"Error: {str(e)}"
+    
+    if not response or not hasattr(response, "choices") or not response.choices:
+        console.print("[red]Error:[/red] Received no response from the API.")
+        return "Error: Received no response from the API."
+    
+    assistant_message = response.choices[0].message
+    
+    if assistant_message.tool_calls:
+        tool_results = []
+        for tool_call in assistant_message.tool_calls:
+            tool_name = tool_call.function.name
+            arguments_str = tool_call.function.arguments
+            tool_call_id = tool_call.id
+            
+            console.print(f"\n[yellow]Tool Used:[/yellow] {tool_name}")
+            console.print(f"[yellow]Tool Input:[/yellow] {arguments_str}")
+            
+            try:
+                tool_input = json.loads(arguments_str)
+            except Exception as e:
+                tool_input = arguments_str
+            
+            result = execute_tool(tool_name, tool_input)
+            tool_results.append(result)
+            
+            console.print(f"[green]Tool Result:[/green]")
+            if isinstance(result, pd.DataFrame):
+                display_dataframe(result)
+            else:
+                console.print(result)
+            
+            conversation_history.append({
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "arguments": arguments_str
+                    }
+                }]
+            })
+            conversation_history.append({
+                "role": "tool",
+                "name": tool_name,
+                "tool_call_id": tool_call_id,
+                "content": str(result)  # Convert result to string to ensure it's serializable
+            })
+        
+        # Get a follow-up response after tool execution
         try:
-            response = client.chat.completions.create(
-                model="openai/gpt-4o-2024-11-20",
-                messages=conversation_history,
-                tools=tools,              # Should use tools parameter
-                tool_choice="auto"        # Should use tool_choice parameter
+            follow_up = client.chat.completions.create(
+                model="openai/o3-mini-high",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_input},
+                    {"role": "assistant", "content": f"I've analyzed the data and here are the results: {', '.join(str(r) for r in tool_results)}. Let me explain what this means."}
+                ]
             )
+            
+            if follow_up and follow_up.choices and follow_up.choices[0].message:
+                follow_up_message = follow_up.choices[0].message.content
+                console.print(f"\n[blue]Analysis:[/blue] {follow_up_message}")
+                conversation_history.append({"role": "assistant", "content": follow_up_message})
+                return follow_up_message
+            else:
+                console.print("[red]No follow-up analysis available[/red]")
+                return tool_results[-1]
         except Exception as e:
-            print_colored(f"API request error: {e}", CLAUDE_COLOR)
-            return f"Error: {str(e)}"
-        
-        if not response or not hasattr(response, "choices") or not response.choices:
-            print_colored("Error: Received no response from the API.", CLAUDE_COLOR)
-            return "Error: Received no response from the API."
-        
-        assistant_message = response.choices[0].message
-        
-        # Fix: Check the tool_calls attribute instead of using dict.get() 
-        if assistant_message.tool_calls:
-            for tool_call in assistant_message.tool_calls:
-                tool_name = tool_call.function.name
-                arguments_str = tool_call.function.arguments
-                tool_call_id = tool_call.id
-                
-                print_colored(f"\nTool Used: {tool_name}", TOOL_COLOR)
-                print_colored(f"Tool Input: {arguments_str}", TOOL_COLOR)
-                try:
-                    tool_input = json.loads(arguments_str)
-                except Exception as e:
-                    tool_input = arguments_str  # fallback if not valid JSON
-                
-                result = execute_tool(tool_name, tool_input)
-                print_colored(f"Tool Result: {result}", RESULT_COLOR)
-                
-                conversation_history.append({
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [{
-                        "id": tool_call_id,
-                        "type": "function",
-                        "function": {
-                            "name": tool_name,
-                            "arguments": arguments_str
-                        }
-                    }]
-                })
-                conversation_history.append({
-                    "role": "tool",
-                    "name": tool_name,
-                    "tool_call_id": tool_call_id,
-                    "content": result
-                })
-        else:
-            assistant_response = assistant_message.content or ""
-            print_colored(f"\nClaude: {assistant_response}", CLAUDE_COLOR)
-            conversation_history.append({"role": "assistant", "content": assistant_response})
-            break
-    return assistant_response
+            console.print(f"[red]Error getting follow-up analysis:[/red] {str(e)}")
+            return tool_results[-1]  # Return the last tool result if follow-up fails
+    else:
+        assistant_response = assistant_message.content or ""
+        console.print(f"\n[blue]Claude:[/blue] {assistant_response}")
+        conversation_history.append({"role": "assistant", "content": assistant_response})
+        return assistant_response
 
 def main():
-    print_colored("Welcome to your AI-powered Data Analyst!\n", CLAUDE_COLOR)
-    print_colored("I am Claude, and I can help you analyze data from various file formats.", CLAUDE_COLOR)
-    print_colored("Just chat with me naturally about what you'd like to do and I'll do my best to assist you.", CLAUDE_COLOR)
-    print_colored("You can ask me to read data files, preprocess data, perform statistical analysis, visualize data, and more.", CLAUDE_COLOR)
-    print_colored("Type 'exit' to end the conversation.", CLAUDE_COLOR)
+    console.print(Panel.fit(WELCOME_ART, border_style="blue"))
+    console.print("\n[bold blue]Welcome to your AI-powered Data Analyst![/bold blue]")
+    console.print("[cyan]I can help you analyze data from various file formats.[/cyan]")
+    console.print("[green]Just chat naturally about what you'd like to do![/green]")
+    console.print("[yellow]Type 'exit' to end the conversation.[/yellow]\n")
     
     while True:
-        user_input = input(f"\n{USER_COLOR}You: {Style.RESET_ALL}")
+        user_input = Prompt.ask("[bold blue]You")
         if user_input.lower() == 'exit':
-            print_colored("Thank you for using the AI Data Analyst. Goodbye!", CLAUDE_COLOR)
+            console.print("\n[bold green]Thank you for using the AI Data Analyst. Goodbye![/bold green]")
             break
         
-        response = chat_with_claude(user_input)
-        
-        if "```" in response:
-            parts = response.split("```")
-            for i, part in enumerate(parts):
-                if i % 2 == 0:
-                    print_colored(part, CLAUDE_COLOR)
-                else:
-                    lines = part.split('\n')
-                    language = lines[0].strip() if lines else ""
-                    code = '\n'.join(lines[1:]) if len(lines) > 1 else ""
-                    
-                    if language and code:
-                        print_code(code, language)
-                    elif code:
-                        print_colored(f"Code:\n{code}", CLAUDE_COLOR)
+        with console.status("[bold blue]Processing...") as status:
+            response = chat_with_claude(user_input)
+            
+            # Only try to process code blocks if response is a string and contains code blocks
+            if isinstance(response, str) and "```" in response:
+                parts = response.split("```")
+                for i, part in enumerate(parts):
+                    if i % 2 == 0:
+                        console.print(Markdown(part))
                     else:
-                        print_colored(part, CLAUDE_COLOR)
+                        lines = part.split('\n')
+                        language = lines[0].strip() if lines else ""
+                        code = '\n'.join(lines[1:]) if len(lines) > 1 else ""
+                        
+                        if language and code:
+                            print_code(code, language)
+                        elif code:
+                            print_code(code, "python")
+                        else:
+                            console.print(part)
 
 if __name__ == "__main__":
     main()

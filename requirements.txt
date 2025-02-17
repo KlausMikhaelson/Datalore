@@ -7,3 +7,4 @@ scikit-learn
 numpy
 colorama
 pygments
+rich>=10.0.0
