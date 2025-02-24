@@ -3,3 +3,5 @@
 .env
 constellation.py
 *.png
+*.csv
+*.mdc
